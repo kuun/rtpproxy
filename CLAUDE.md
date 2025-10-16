@@ -82,6 +82,7 @@ This document records the requirements and specifications provided during the de
 1. **Rust Edition**: Use Rust 2024 Edition
 2. **Comments and Logs**: All comments and log messages must be in English
 3. **Network Interface**: Endpoint message should NOT include interface field (only address and port)
+4. **Session ID**: Session ID must be user-specified (string type) when creating a session via gRPC API, not auto-generated
 
 ### Technical Decisions Made
 

@@ -46,23 +46,26 @@ message Endpoint {
 
 // Create session request
 message CreateSessionRequest {
+  // Session ID (user-specified)
+  string session_id = 1;
+
   // Listen endpoint (receive inbound traffic)
-  Endpoint listen_endpoint = 1;
+  Endpoint listen_endpoint = 2;
 
   // Forward endpoint (send outbound traffic)
-  Endpoint forward_endpoint = 2;
+  Endpoint forward_endpoint = 3;
 
   // Destination endpoint (final destination)
-  Endpoint destination_endpoint = 3;
+  Endpoint destination_endpoint = 4;
 
   // Protocol type
-  Protocol protocol = 4;
+  Protocol protocol = 5;
 
   // Session timeout in seconds, 0 means no timeout
-  uint32 timeout_seconds = 5;
+  uint32 timeout_seconds = 6;
 
   // Statistics reporting interval in seconds, 0 means no automatic reporting
-  uint32 stats_interval_seconds = 6;
+  uint32 stats_interval_seconds = 7;
 }
 
 // Create session response

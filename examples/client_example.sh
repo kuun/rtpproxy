@@ -10,17 +10,18 @@ echo ""
 
 # 1. Create a session
 echo "1. Creating a new session..."
-SESSION_RESPONSE=$(grpcurl -plaintext -d '{
-  "listen_endpoint": {"address": "0.0.0.0", "port": 20000},
-  "forward_endpoint": {"address": "0.0.0.0", "port": 20001},
-  "destination_endpoint": {"address": "127.0.0.1", "port": 30000},
-  "protocol": 1,
-  "timeout_seconds": 0,
-  "stats_interval_seconds": 5
-}' $PROXY_ADDR rtpproxy.RtpProxy/CreateSession 2>&1)
+SESSION_ID="example-session-$(date +%s)"
+SESSION_RESPONSE=$(grpcurl -plaintext -d "{
+  \"session_id\": \"$SESSION_ID\",
+  \"listen_endpoint\": {\"address\": \"0.0.0.0\", \"port\": 20000},
+  \"forward_endpoint\": {\"address\": \"0.0.0.0\", \"port\": 20001},
+  \"destination_endpoint\": {\"address\": \"127.0.0.1\", \"port\": 30000},
+  \"protocol\": 1,
+  \"timeout_seconds\": 0,
+  \"stats_interval_seconds\": 5
+}" $PROXY_ADDR rtpproxy.RtpProxy/CreateSession 2>&1)
 
 echo "$SESSION_RESPONSE"
-SESSION_ID=$(echo "$SESSION_RESPONSE" | grep -oP '(?<=session_id": ")[^"]*')
 echo ""
 echo "Created session: $SESSION_ID"
 echo ""

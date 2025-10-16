@@ -72,6 +72,7 @@ The proxy provides the following gRPC services:
 Create a new RTP proxy session.
 
 **Request:**
+- `session_id`: User-specified session identifier (required, must be unique)
 - `listen_endpoint`: Address/port to listen for incoming RTP traffic
 - `forward_endpoint`: Address/port to use for outgoing traffic (source binding)
 - `destination_endpoint`: Address/port of the final destination
@@ -80,7 +81,7 @@ Create a new RTP proxy session.
 - `stats_interval_seconds`: Statistics reporting interval (0 = no automatic reporting)
 
 **Response:**
-- `session_id`: Unique identifier for the created session
+- `session_id`: Echo of the user-specified session ID
 - `created_at`: Unix timestamp of session creation
 
 #### DestroySession
@@ -132,6 +133,7 @@ Using `grpcurl` to interact with the proxy:
 
 ```bash
 grpcurl -plaintext -d '{
+  "session_id": "my-rtp-session-001",
   "listen_endpoint": {"address": "0.0.0.0", "port": 20000},
   "forward_endpoint": {"address": "0.0.0.0", "port": 20001},
   "destination_endpoint": {"address": "192.168.1.100", "port": 30000},
@@ -144,7 +146,7 @@ grpcurl -plaintext -d '{
 **Response:**
 ```json
 {
-  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "session_id": "my-rtp-session-001",
   "created_at": "1234567890"
 }
 ```
@@ -153,7 +155,7 @@ grpcurl -plaintext -d '{
 
 ```bash
 grpcurl -plaintext -d '{
-  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  "session_id": "my-rtp-session-001"
 }' localhost:50051 rtpproxy.RtpProxy/GetSessionStatus
 ```
 
@@ -167,7 +169,7 @@ grpcurl -plaintext -d '{}' localhost:50051 rtpproxy.RtpProxy/ListSessions
 
 ```bash
 grpcurl -plaintext -d '{
-  "session_ids": ["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
+  "session_ids": ["my-rtp-session-001"]
 }' localhost:50051 rtpproxy.RtpProxy/StreamSessionEvents
 ```
 
@@ -175,7 +177,7 @@ grpcurl -plaintext -d '{
 
 ```bash
 grpcurl -plaintext -d '{
-  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  "session_id": "my-rtp-session-001"
 }' localhost:50051 rtpproxy.RtpProxy/DestroySession
 ```
 

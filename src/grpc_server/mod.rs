@@ -43,9 +43,14 @@ impl RtpProxy for RtpProxyService {
     ) -> Result<Response<CreateSessionResponse>, Status> {
         let req = request.into_inner();
 
+        // Validate session_id
+        if req.session_id.is_empty() {
+            return Err(Status::invalid_argument("session_id is required and cannot be empty"));
+        }
+
         info!(
-            "Received CreateSession request: listen={:?}, forward={:?}, dest={:?}",
-            req.listen_endpoint, req.forward_endpoint, req.destination_endpoint
+            "Received CreateSession request: session_id={}, listen={:?}, forward={:?}, dest={:?}",
+            req.session_id, req.listen_endpoint, req.forward_endpoint, req.destination_endpoint
         );
 
         // Parse endpoints
@@ -80,8 +85,8 @@ impl RtpProxy for RtpProxyService {
             stats_interval_seconds: req.stats_interval_seconds,
         };
 
-        // Create session
-        match self.session_manager.create_session(config).await {
+        // Create session with user-specified session_id
+        match self.session_manager.create_session(req.session_id.clone(), config).await {
             Ok(session_id) => {
                 info!("Session {} created successfully", session_id);
 
@@ -89,6 +94,10 @@ impl RtpProxy for RtpProxyService {
                     session_id,
                     created_at: chrono::Utc::now().timestamp(),
                 }))
+            }
+            Err(ProxyError::SessionExists(id)) => {
+                warn!("Session {} already exists", id);
+                Err(Status::already_exists(format!("Session {} already exists", id)))
             }
             Err(e) => {
                 error!("Failed to create session: {}", e);

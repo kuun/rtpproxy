@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
-use uuid::Uuid;
 
 use crate::error::{ProxyError, Result};
 use crate::transport::{create_transport, TransportAdapter, TransportType};
@@ -146,16 +145,16 @@ pub struct Session {
 }
 
 impl Session {
-    /// Create a new session with given configuration
+    /// Create a new session with given configuration and session ID
     pub async fn new(
+        session_id: String,
         config: SessionConfig,
         event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Result<Self> {
-        let id = Uuid::new_v4().to_string();
         let created_at = current_timestamp();
 
         info!("Creating session {}: listen={}, forward={}, dest={}, protocol={:?}",
-            id, config.listen_addr, config.forward_addr, config.destination_addr, config.protocol);
+            session_id, config.listen_addr, config.forward_addr, config.destination_addr, config.protocol);
 
         // Create transport adapter
         let transport = create_transport(
@@ -168,7 +167,7 @@ impl Session {
         let (stop_tx, _stop_rx) = broadcast::channel::<()>(1);
 
         let session = Self {
-            id: id.clone(),
+            id: session_id.clone(),
             config: config.clone(),
             state: Arc::new(tokio::sync::RwLock::new(SessionState::Connecting)),
             stats: Arc::new(TrafficStats::new()),
@@ -182,7 +181,7 @@ impl Session {
 
         // Send creation event
         let _ = event_tx.send(SessionEvent::Created {
-            session_id: id.clone(),
+            session_id: session_id.clone(),
             timestamp: created_at,
         });
 
@@ -363,10 +362,14 @@ impl SessionManager {
         }
     }
 
-    /// Create a new session with the given configuration
-    pub async fn create_session(&self, config: SessionConfig) -> Result<String> {
-        let mut session = Session::new(config, self.event_tx.clone()).await?;
-        let session_id = session.id.clone();
+    /// Create a new session with the given session ID and configuration
+    pub async fn create_session(&self, session_id: String, config: SessionConfig) -> Result<String> {
+        // Check if session already exists
+        if self.sessions.contains_key(&session_id) {
+            return Err(ProxyError::SessionExists(session_id));
+        }
+
+        let mut session = Session::new(session_id.clone(), config, self.event_tx.clone()).await?;
 
         // Start the session
         session.start(self.event_tx.clone()).await?;
