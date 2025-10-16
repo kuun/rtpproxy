@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package rtpproxy;
+
+// RTP proxy service definition
+service RtpProxy {
+  // Create a new session
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+
+  // Destroy an existing session
+  rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
+
+  // Get session status
+  rpc GetSessionStatus(GetSessionStatusRequest) returns (GetSessionStatusResponse);
+
+  // List all sessions
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // Stream session status updates
+  rpc StreamSessionEvents(StreamSessionEventsRequest) returns (stream SessionEvent);
+}
+
+// Protocol type
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  UDP = 1;
+  TCP = 2;
+}
+
+// Session state
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  CONNECTING = 1;
+  ACTIVE = 2;
+  ERROR = 3;
+  CLOSED = 4;
+}
+
+// Network endpoint configuration
+message Endpoint {
+  // IP address
+  string address = 1;
+  // Port number
+  uint32 port = 2;
+}
+
+// Create session request
+message CreateSessionRequest {
+  // Listen endpoint (receive inbound traffic)
+  Endpoint listen_endpoint = 1;
+
+  // Forward endpoint (send outbound traffic)
+  Endpoint forward_endpoint = 2;
+
+  // Destination endpoint (final destination)
+  Endpoint destination_endpoint = 3;
+
+  // Protocol type
+  Protocol protocol = 4;
+
+  // Session timeout in seconds, 0 means no timeout
+  uint32 timeout_seconds = 5;
+
+  // Statistics reporting interval in seconds, 0 means no automatic reporting
+  uint32 stats_interval_seconds = 6;
+}
+
+// Create session response
+message CreateSessionResponse {
+  // Session ID
+  string session_id = 1;
+
+  // Creation timestamp (Unix timestamp)
+  int64 created_at = 2;
+}
+
+// Destroy session request
+message DestroySessionRequest {
+  string session_id = 1;
+}
+
+// Destroy session response
+message DestroySessionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Get session status request
+message GetSessionStatusRequest {
+  string session_id = 1;
+}
+
+// Traffic statistics
+message TrafficStats {
+  // Number of packets received
+  uint64 packets_received = 1;
+  // Number of bytes received
+  uint64 bytes_received = 2;
+  // Number of packets sent
+  uint64 packets_sent = 3;
+  // Number of bytes sent
+  uint64 bytes_sent = 4;
+  // Number of packets lost
+  uint64 packets_lost = 5;
+  // Packet loss rate (percentage)
+  double packet_loss_rate = 6;
+  // Average latency in milliseconds
+  double avg_latency_ms = 7;
+}
+
+// Session detailed information
+message SessionInfo {
+  // Session ID
+  string session_id = 1;
+
+  // Session state
+  SessionState state = 2;
+
+  // Listen endpoint
+  Endpoint listen_endpoint = 3;
+
+  // Forward endpoint
+  Endpoint forward_endpoint = 4;
+
+  // Destination endpoint
+  Endpoint destination_endpoint = 5;
+
+  // Protocol type
+  Protocol protocol = 6;
+
+  // Creation time
+  int64 created_at = 7;
+
+  // Last activity time
+  int64 last_activity_at = 8;
+
+  // Traffic statistics
+  TrafficStats stats = 9;
+
+  // Error message (if any)
+  string error_message = 10;
+}
+
+// Get session status response
+message GetSessionStatusResponse {
+  SessionInfo session = 1;
+}
+
+// List sessions request
+message ListSessionsRequest {
+  // Optional state filter
+  optional SessionState state_filter = 1;
+}
+
+// List sessions response
+message ListSessionsResponse {
+  repeated SessionInfo sessions = 1;
+  uint32 total_count = 2;
+}
+
+// Stream session events request
+message StreamSessionEventsRequest {
+  // Optional session ID filter, empty means listen to all sessions
+  repeated string session_ids = 1;
+}
+
+// Session event type
+enum SessionEventType {
+  SESSION_EVENT_TYPE_UNSPECIFIED = 0;
+  SESSION_CREATED = 1;
+  SESSION_STATE_CHANGED = 2;
+  SESSION_STATS_UPDATE = 3;
+  SESSION_ERROR = 4;
+  SESSION_CLOSED = 5;
+}
+
+// Session event
+message SessionEvent {
+  // Event type
+  SessionEventType event_type = 1;
+
+  // Session information
+  SessionInfo session = 2;
+
+  // Event timestamp
+  int64 timestamp = 3;
+
+  // Event description
+  string description = 4;
+}
