@@ -8,9 +8,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
 use crate::error::{ProxyError, Result};
-use crate::transport::{create_transport, TransportAdapter, TransportType, UdpTransport};
+use crate::transport::{create_transport, TransportAdapter, TransportType, UdpTransport, TcpTransport};
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Wrapper for UdpTransport to implement TransportAdapter for Arc<UdpTransport>
 struct UdpTransportWrapper(Arc<UdpTransport>);
@@ -166,6 +167,8 @@ pub struct Session {
     transport: Arc<Box<dyn TransportAdapter>>,
     // Store UDP transport separately to access RTCP sockets
     udp_transport: Option<Arc<UdpTransport>>,
+    // Store TCP transport separately to access streams for bidirectional forwarding
+    tcp_transport: Option<Arc<TcpTransport>>,
     stop_tx: broadcast::Sender<()>,
     task_handle: Option<JoinHandle<()>>,
     reverse_rtp_task_handle: Option<JoinHandle<()>>,
@@ -186,21 +189,22 @@ impl Session {
             session_id, config.listen_addr, config.forward_addr, config.destination_addr, config.protocol);
 
         // Create transport adapter
-        // For UDP, create and store the UdpTransport to access RTCP sockets
-        let (transport, udp_transport): (Box<dyn TransportAdapter>, Option<Arc<UdpTransport>>) =
+        // For UDP/TCP, create and store the concrete transport to access specific features
+        let (transport, udp_transport, tcp_transport) =
             if matches!(config.protocol, TransportType::Udp) {
                 let udp = UdpTransport::new(config.listen_addr, config.forward_addr).await?;
                 let udp_arc = Arc::new(udp);
-                // Clone the Arc and box it as a trait object
                 let boxed: Box<dyn TransportAdapter> = Box::new(UdpTransportWrapper(Arc::clone(&udp_arc)));
-                (boxed, Some(udp_arc))
+                (boxed, Some(udp_arc), None)
             } else {
+                let tcp = TcpTransport::new(config.listen_addr, config.forward_addr).await?;
+                let tcp_arc = Arc::new(tcp);
                 let transport = create_transport(
                     config.protocol.clone(),
                     config.listen_addr,
                     config.forward_addr,
                 ).await?;
-                (transport, None)
+                (transport, None, Some(tcp_arc))
             };
 
         let (stop_tx, _stop_rx) = broadcast::channel::<()>(1);
@@ -215,6 +219,7 @@ impl Session {
             error_message: Arc::new(tokio::sync::RwLock::new(None)),
             transport: Arc::new(transport),
             udp_transport,
+            tcp_transport,
             stop_tx,
             task_handle: None,
             reverse_rtp_task_handle: None,
@@ -252,6 +257,11 @@ impl Session {
             self.start_reverse_rtp_forwarding()?;
             self.start_rtcp_forwarding()?;
             self.start_reverse_rtcp_forwarding()?;
+        }
+
+        // Start reverse RTP forwarding for TCP sessions
+        if matches!(self.config.protocol, TransportType::Tcp) {
+            self.start_reverse_tcp_forwarding()?;
         }
 
         // Start statistics reporting task if interval is configured
@@ -492,6 +502,115 @@ impl Session {
         );
 
         self.reverse_rtcp_task_handle = Some(handle);
+        Ok(())
+    }
+
+    /// Start reverse TCP forwarding task (destination -> client)
+    fn start_reverse_tcp_forwarding(&mut self) -> Result<()> {
+        // Get TCP streams from TcpTransport
+        let tcp_transport = self.tcp_transport.as_ref()
+            .ok_or_else(|| ProxyError::Transport("TCP transport not available for reverse forwarding".to_string()))?;
+
+        let client_stream = tcp_transport.client_stream();
+        let dest_stream = tcp_transport.dest_stream();
+        let client_addr = tcp_transport.client_addr();
+
+        let session_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
+        let last_activity = Arc::clone(&self.last_activity);
+        let mut stop_rx = self.stop_tx.subscribe();
+
+        info!("Starting reverse TCP forwarding for session {}", session_id);
+
+        let handle = tokio::spawn(async move {
+            info!("Session {} reverse TCP forwarding task started", session_id);
+
+            // Wait for both streams to be available
+            loop {
+                let client_ready = client_stream.lock().await.is_some();
+                let dest_ready = dest_stream.lock().await.is_some();
+
+                if client_ready && dest_ready {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("Session {} reverse TCP task received stop signal before streams ready", session_id);
+                        return;
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+                }
+            }
+
+            loop {
+                tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("Session {} reverse TCP task received stop signal", session_id);
+                        break;
+                    }
+                    result = async {
+                        // Read from destination stream
+                        let mut dest_guard = dest_stream.lock().await;
+                        if let Some(ref mut stream) = *dest_guard {
+                            let mut buf = vec![0u8; 65535];
+                            let read_result = stream.read(&mut buf).await;
+                            drop(dest_guard); // Release lock early
+
+                            match read_result {
+                                Ok(0) => {
+                                    info!("TCP destination disconnected");
+                                    Err(ProxyError::Transport("Connection closed by destination".to_string()))
+                                }
+                                Ok(len) => {
+                                    buf.truncate(len);
+                                    debug!("Session {}: received reverse TCP {} bytes from destination", session_id, len);
+                                    stats.record_received(len as u64);
+                                    *last_activity.write().await = current_timestamp();
+
+                                    // Get client address for logging
+                                    let client_addr_val = client_addr.lock().await.unwrap_or_else(|| "unknown".parse().unwrap());
+
+                                    // Forward to client
+                                    let mut client_guard = client_stream.lock().await;
+                                    if let Some(ref mut client) = *client_guard {
+                                        match client.write_all(&buf).await {
+                                            Ok(_) => {
+                                                stats.record_sent(len as u64);
+                                                debug!("Session {}: forwarded reverse TCP {} bytes to {}", session_id, len, client_addr_val);
+                                                Ok(())
+                                            }
+                                            Err(e) => {
+                                                error!("Session {}: failed to forward reverse TCP: {}", session_id, e);
+                                                stats.record_lost();
+                                                Err(ProxyError::Io(e))
+                                            }
+                                        }
+                                    } else {
+                                        Err(ProxyError::Transport("Client stream not available".to_string()))
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Session {}: reverse TCP recv error: {}", session_id, e);
+                                    Err(ProxyError::Io(e))
+                                }
+                            }
+                        } else {
+                            Err(ProxyError::Transport("Destination stream not available".to_string()))
+                        }
+                    } => {
+                        if let Err(e) = result {
+                            error!("Session {}: reverse TCP error: {}", session_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            info!("Session {} reverse TCP forwarding task stopped", session_id);
+        });
+
+        self.reverse_rtp_task_handle = Some(handle);
         Ok(())
     }
 }

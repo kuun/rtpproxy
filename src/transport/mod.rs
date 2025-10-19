@@ -167,6 +167,21 @@ impl TcpTransport {
         })
     }
 
+    /// Get client stream for bidirectional communication
+    pub fn client_stream(&self) -> Arc<tokio::sync::Mutex<Option<TcpStream>>> {
+        Arc::clone(&self.client_stream)
+    }
+
+    /// Get destination stream for bidirectional communication
+    pub fn dest_stream(&self) -> Arc<tokio::sync::Mutex<Option<TcpStream>>> {
+        Arc::clone(&self.dest_stream)
+    }
+
+    /// Get client address
+    pub fn client_addr(&self) -> Arc<tokio::sync::Mutex<Option<SocketAddr>>> {
+        Arc::clone(&self.client_addr)
+    }
+
     /// Accept client connection
     async fn accept_client(&self) -> Result<()> {
         let (stream, addr) = self.listener.accept().await
