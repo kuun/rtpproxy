@@ -244,77 +244,8 @@ impl Session {
         // Update state to Active
         self.set_state(SessionState::Active).await;
 
-        // Start forwarding task
-        let session_id = self.id.clone();
-        let transport = Arc::clone(&self.transport);
-        let stats = Arc::clone(&self.stats);
-        let last_activity = Arc::clone(&self.last_activity);
-        let destination = self.config.destination_addr;
-        let state = Arc::clone(&self.state);
-        let error_message = Arc::clone(&self.error_message);
-        let event_tx_clone = event_tx.clone();
-        let mut stop_rx = self.stop_tx.subscribe();
-
-        let task_handle = tokio::spawn(async move {
-            info!("Session {} forwarding task started", session_id);
-
-            loop {
-                tokio::select! {
-                    _ = stop_rx.recv() => {
-                        info!("Session {} received stop signal", session_id);
-                        break;
-                    }
-                    recv_result = transport.recv() => {
-                        match recv_result {
-                            Ok((data, src)) => {
-                                let len = data.len() as u64;
-                                stats.record_received(len);
-                                *last_activity.write().await = current_timestamp();
-
-                                debug!("Session {}: received {} bytes from {}", session_id, len, src);
-
-                                // Forward data to destination
-                                match transport.send(data, destination).await {
-                                    Ok(sent) => {
-                                        stats.record_sent(sent as u64);
-                                        debug!("Session {}: forwarded {} bytes to {}", session_id, sent, destination);
-                                    }
-                                    Err(e) => {
-                                        error!("Session {}: failed to forward data: {}", session_id, e);
-                                        stats.record_lost();
-
-                                        *error_message.write().await = Some(e.to_string());
-                                        *state.write().await = SessionState::Error;
-
-                                        let _ = event_tx_clone.send(SessionEvent::Error {
-                                            session_id: session_id.clone(),
-                                            error: e.to_string(),
-                                            timestamp: current_timestamp(),
-                                        });
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("Session {}: recv error: {}", session_id, e);
-                                *error_message.write().await = Some(e.to_string());
-                                *state.write().await = SessionState::Error;
-
-                                let _ = event_tx_clone.send(SessionEvent::Error {
-                                    session_id: session_id.clone(),
-                                    error: e.to_string(),
-                                    timestamp: current_timestamp(),
-                                });
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            info!("Session {} forwarding task stopped", session_id);
-        });
-
-        self.task_handle = Some(task_handle);
+        // Start RTP forwarding task
+        self.start_rtp_forwarding(event_tx.clone())?;
 
         // Start reverse RTP forwarding and RTCP tasks for UDP sessions
         if matches!(self.config.protocol, TransportType::Udp) {
@@ -408,7 +339,84 @@ impl Session {
         self.stats.get_snapshot()
     }
 
-    /// Start RTCP forwarding task
+    /// Start RTP forwarding task (client -> destination)
+    fn start_rtp_forwarding(&mut self, event_tx: mpsc::UnboundedSender<SessionEvent>) -> Result<()> {
+        let session_id = self.id.clone();
+        let transport = Arc::clone(&self.transport);
+        let stats = Arc::clone(&self.stats);
+        let last_activity = Arc::clone(&self.last_activity);
+        let destination = self.config.destination_addr;
+        let state = Arc::clone(&self.state);
+        let error_message = Arc::clone(&self.error_message);
+        let event_tx_clone = event_tx.clone();
+        let mut stop_rx = self.stop_tx.subscribe();
+
+        info!("Starting RTP forwarding for session {}", session_id);
+
+        let task_handle = tokio::spawn(async move {
+            info!("Session {} RTP forwarding task started", session_id);
+
+            loop {
+                tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("Session {} RTP task received stop signal", session_id);
+                        break;
+                    }
+                    recv_result = transport.recv() => {
+                        match recv_result {
+                            Ok((data, src)) => {
+                                let len = data.len() as u64;
+                                stats.record_received(len);
+                                *last_activity.write().await = current_timestamp();
+
+                                debug!("Session {}: received RTP {} bytes from {}", session_id, len, src);
+
+                                // Forward data to destination
+                                match transport.send(data, destination).await {
+                                    Ok(sent) => {
+                                        stats.record_sent(sent as u64);
+                                        debug!("Session {}: forwarded RTP {} bytes to {}", session_id, sent, destination);
+                                    }
+                                    Err(e) => {
+                                        error!("Session {}: failed to forward RTP: {}", session_id, e);
+                                        stats.record_lost();
+
+                                        *error_message.write().await = Some(e.to_string());
+                                        *state.write().await = SessionState::Error;
+
+                                        let _ = event_tx_clone.send(SessionEvent::Error {
+                                            session_id: session_id.clone(),
+                                            error: e.to_string(),
+                                            timestamp: current_timestamp(),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Session {}: RTP recv error: {}", session_id, e);
+                                *error_message.write().await = Some(e.to_string());
+                                *state.write().await = SessionState::Error;
+
+                                let _ = event_tx_clone.send(SessionEvent::Error {
+                                    session_id: session_id.clone(),
+                                    error: e.to_string(),
+                                    timestamp: current_timestamp(),
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Session {} RTP forwarding task stopped", session_id);
+        });
+
+        self.task_handle = Some(task_handle);
+        Ok(())
+    }
+
+    /// Start RTCP forwarding task (client -> destination)
     fn start_rtcp_forwarding(&mut self) -> Result<()> {
         // Get RTCP sockets from UdpTransport
         let udp_transport = self.udp_transport.as_ref()
