@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
@@ -141,55 +142,145 @@ impl TransportAdapter for UdpTransport {
     }
 }
 
-/// TCP transport adapter implementation (placeholder)
+/// TCP transport adapter implementation
 pub struct TcpTransport {
-    listen_addr: SocketAddr,
-    forward_addr: SocketAddr,
-    listener: Option<Arc<TcpListener>>,
-    connection: Option<Arc<tokio::sync::Mutex<TcpStream>>>,
-    forward_connection: Option<Arc<tokio::sync::Mutex<TcpStream>>>,
+    listener: Arc<TcpListener>,
+    client_stream: Arc<tokio::sync::Mutex<Option<TcpStream>>>,
+    dest_stream: Arc<tokio::sync::Mutex<Option<TcpStream>>>,
+    client_addr: Arc<tokio::sync::Mutex<Option<SocketAddr>>>,
 }
 
 impl TcpTransport {
     pub async fn new(listen_addr: SocketAddr, forward_addr: SocketAddr) -> Result<Self> {
         info!("Creating TCP transport: listen={}, forward={}", listen_addr, forward_addr);
 
+        // Bind TCP listener immediately
+        let listener = TcpListener::bind(listen_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to bind TCP listener: {}", e)))?;
+        info!("TCP listener bound to {}", listener.local_addr()?);
+
         Ok(Self {
-            listen_addr,
-            forward_addr,
-            listener: None,
-            connection: None,
-            forward_connection: None,
+            listener: Arc::new(listener),
+            client_stream: Arc::new(tokio::sync::Mutex::new(None)),
+            dest_stream: Arc::new(tokio::sync::Mutex::new(None)),
+            client_addr: Arc::new(tokio::sync::Mutex::new(None)),
         })
+    }
+
+    /// Accept client connection
+    async fn accept_client(&self) -> Result<()> {
+        let (stream, addr) = self.listener.accept().await
+            .map_err(|e| ProxyError::Transport(format!("Failed to accept connection: {}", e)))?;
+
+        info!("Accepted TCP connection from {}", addr);
+
+        *self.client_stream.lock().await = Some(stream);
+        *self.client_addr.lock().await = Some(addr);
+
+        Ok(())
+    }
+
+    /// Connect to destination
+    async fn connect_destination(&self, dest_addr: SocketAddr) -> Result<()> {
+        info!("Connecting to TCP destination {}", dest_addr);
+
+        let stream = TcpStream::connect(dest_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to connect to destination: {}", e)))?;
+
+        info!("Connected to TCP destination {}", dest_addr);
+
+        *self.dest_stream.lock().await = Some(stream);
+
+        Ok(())
     }
 }
 
 #[async_trait]
 impl TransportAdapter for TcpTransport {
     async fn start(&self) -> Result<()> {
-        info!("TCP transport starting");
-        // TCP connections need to be established when accepting connections
+        info!("TCP transport starting - waiting for client connection");
         Ok(())
     }
 
     async fn recv(&self) -> Result<(Bytes, SocketAddr)> {
-        // Check if listener is initialized
-        if self.listener.is_none() {
-            return Err(ProxyError::Transport("TCP listener not initialized".to_string()));
+        // Accept client connection if not already connected
+        {
+            let client = self.client_stream.lock().await;
+            if client.is_none() {
+                drop(client);
+                self.accept_client().await?;
+            }
         }
 
-        // TCP implementation is more complex and requires connection state management
-        // This is a simplified placeholder; proper implementation should be in the session layer
-        Err(ProxyError::Transport("TCP recv not implemented in this simplified version".to_string()))
+        // Get client address
+        let client_addr = {
+            let addr = self.client_addr.lock().await;
+            addr.ok_or_else(|| ProxyError::Transport("Client address not available".to_string()))?
+        };
+
+        // Read data from client
+        let mut stream_guard = self.client_stream.lock().await;
+        let stream = stream_guard.as_mut()
+            .ok_or_else(|| ProxyError::Transport("Client stream not available".to_string()))?;
+
+        let mut buf = vec![0u8; 65535];
+        match stream.read(&mut buf).await {
+            Ok(0) => {
+                info!("TCP client disconnected");
+                Err(ProxyError::Transport("Connection closed by client".to_string()))
+            }
+            Ok(len) => {
+                buf.truncate(len);
+                debug!("Received TCP {} bytes from {}", len, client_addr);
+                Ok((Bytes::from(buf), client_addr))
+            }
+            Err(e) => {
+                error!("TCP recv error: {}", e);
+                Err(ProxyError::Io(e))
+            }
+        }
     }
 
-    async fn send(&self, _data: Bytes, _dest: SocketAddr) -> Result<usize> {
-        // TCP send requires connection establishment
-        Err(ProxyError::Transport("TCP send not implemented in this simplified version".to_string()))
+    async fn send(&self, data: Bytes, dest: SocketAddr) -> Result<usize> {
+        // Connect to destination if not already connected
+        {
+            let dest_stream = self.dest_stream.lock().await;
+            if dest_stream.is_none() {
+                drop(dest_stream);
+                self.connect_destination(dest).await?;
+            }
+        }
+
+        // Write data to destination
+        let mut stream_guard = self.dest_stream.lock().await;
+        let stream = stream_guard.as_mut()
+            .ok_or_else(|| ProxyError::Transport("Destination stream not available".to_string()))?;
+
+        match stream.write_all(&data).await {
+            Ok(_) => {
+                debug!("Sent TCP {} bytes to {}", data.len(), dest);
+                Ok(data.len())
+            }
+            Err(e) => {
+                error!("TCP send error: {}", e);
+                Err(ProxyError::Io(e))
+            }
+        }
     }
 
     async fn close(&self) -> Result<()> {
         info!("Closing TCP transport");
+
+        // Close client connection
+        if let Some(mut stream) = self.client_stream.lock().await.take() {
+            let _ = stream.shutdown().await;
+        }
+
+        // Close destination connection
+        if let Some(mut stream) = self.dest_stream.lock().await.take() {
+            let _ = stream.shutdown().await;
+        }
+
         Ok(())
     }
 }
