@@ -23,73 +23,110 @@ pub trait TransportAdapter: Send + Sync {
     async fn close(&self) -> Result<()>;
 }
 
-/// UDP transport adapter implementation
+/// UDP transport adapter implementation with RTCP support
 pub struct UdpTransport {
-    listen_socket: Arc<UdpSocket>,
-    forward_socket: Arc<UdpSocket>,
+    // RTP sockets
+    rtp_listen_socket: Arc<UdpSocket>,
+    rtp_forward_socket: Arc<UdpSocket>,
+    // RTCP sockets (port + 1)
+    rtcp_listen_socket: Arc<UdpSocket>,
+    rtcp_forward_socket: Arc<UdpSocket>,
 }
 
 impl UdpTransport {
     pub async fn new(listen_addr: SocketAddr, forward_addr: SocketAddr) -> Result<Self> {
-        info!("Creating UDP transport: listen={}, forward={}", listen_addr, forward_addr);
+        info!("Creating UDP transport with RTCP support: listen={}, forward={}", listen_addr, forward_addr);
 
-        // Bind listen socket
-        let listen_socket = UdpSocket::bind(listen_addr).await
-            .map_err(|e| ProxyError::Transport(format!("Failed to bind listen socket: {}", e)))?;
+        // Bind RTP listen socket
+        let rtp_listen_socket = UdpSocket::bind(listen_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to bind RTP listen socket: {}", e)))?;
+        info!("RTP listen socket bound to {}", rtp_listen_socket.local_addr()?);
 
-        info!("UDP listen socket bound to {}", listen_socket.local_addr()?);
+        // Bind RTP forward socket
+        let rtp_forward_socket = UdpSocket::bind(forward_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to bind RTP forward socket: {}", e)))?;
+        info!("RTP forward socket bound to {}", rtp_forward_socket.local_addr()?);
 
-        // Bind forward socket
-        let forward_socket = UdpSocket::bind(forward_addr).await
-            .map_err(|e| ProxyError::Transport(format!("Failed to bind forward socket: {}", e)))?;
+        // Calculate RTCP addresses (port + 1)
+        let rtcp_listen_addr = increment_port(listen_addr)?;
+        let rtcp_forward_addr = increment_port(forward_addr)?;
 
-        info!("UDP forward socket bound to {}", forward_socket.local_addr()?);
+        // Bind RTCP listen socket
+        let rtcp_listen_socket = UdpSocket::bind(rtcp_listen_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to bind RTCP listen socket: {}", e)))?;
+        info!("RTCP listen socket bound to {}", rtcp_listen_socket.local_addr()?);
+
+        // Bind RTCP forward socket
+        let rtcp_forward_socket = UdpSocket::bind(rtcp_forward_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to bind RTCP forward socket: {}", e)))?;
+        info!("RTCP forward socket bound to {}", rtcp_forward_socket.local_addr()?);
 
         Ok(Self {
-            listen_socket: Arc::new(listen_socket),
-            forward_socket: Arc::new(forward_socket),
+            rtp_listen_socket: Arc::new(rtp_listen_socket),
+            rtp_forward_socket: Arc::new(rtp_forward_socket),
+            rtcp_listen_socket: Arc::new(rtcp_listen_socket),
+            rtcp_forward_socket: Arc::new(rtcp_forward_socket),
         })
     }
+
+    /// Get RTCP listen socket for concurrent receiving
+    pub fn rtcp_listen_socket(&self) -> Arc<UdpSocket> {
+        Arc::clone(&self.rtcp_listen_socket)
+    }
+
+    /// Get RTCP forward socket for sending
+    pub fn rtcp_forward_socket(&self) -> Arc<UdpSocket> {
+        Arc::clone(&self.rtcp_forward_socket)
+    }
+}
+
+/// Increment the port number of a SocketAddr by 1
+fn increment_port(addr: SocketAddr) -> Result<SocketAddr> {
+    let mut new_addr = addr;
+    let new_port = addr.port().checked_add(1)
+        .ok_or_else(|| ProxyError::Transport("Port overflow when calculating RTCP port".to_string()))?;
+    new_addr.set_port(new_port);
+    Ok(new_addr)
 }
 
 #[async_trait]
 impl TransportAdapter for UdpTransport {
     async fn start(&self) -> Result<()> {
-        info!("UDP transport started");
+        info!("UDP transport with RTCP support started");
         Ok(())
     }
 
     async fn recv(&self) -> Result<(Bytes, SocketAddr)> {
         let mut buf = vec![0u8; 65535]; // Maximum UDP packet size
 
-        match self.listen_socket.recv_from(&mut buf).await {
+        match self.rtp_listen_socket.recv_from(&mut buf).await {
             Ok((len, src)) => {
                 buf.truncate(len);
-                debug!("Received {} bytes from {}", len, src);
+                debug!("Received RTP {} bytes from {}", len, src);
                 Ok((Bytes::from(buf), src))
             }
             Err(e) => {
-                error!("UDP recv error: {}", e);
+                error!("RTP recv error: {}", e);
                 Err(ProxyError::Io(e))
             }
         }
     }
 
     async fn send(&self, data: Bytes, dest: SocketAddr) -> Result<usize> {
-        match self.forward_socket.send_to(&data, dest).await {
+        match self.rtp_forward_socket.send_to(&data, dest).await {
             Ok(len) => {
-                debug!("Sent {} bytes to {}", len, dest);
+                debug!("Sent RTP {} bytes to {}", len, dest);
                 Ok(len)
             }
             Err(e) => {
-                error!("UDP send error: {}", e);
+                error!("RTP send error: {}", e);
                 Err(ProxyError::Io(e))
             }
         }
     }
 
     async fn close(&self) -> Result<()> {
-        info!("Closing UDP transport");
+        info!("Closing UDP transport (RTP and RTCP)");
         Ok(())
     }
 }

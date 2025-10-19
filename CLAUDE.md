@@ -100,7 +100,12 @@ This document records the requirements and specifications provided during the de
    - Automatic packet loss rate calculation
    - Per-session last activity timestamp
 
-4. **Event System**:
+4. **RTCP Support** (UDP only):
+   - Automatic RTCP forwarding on port + 1
+   - Separate task for RTCP packet handling
+   - Same address as RTP, different port
+
+5. **Event System**:
    - Unbounded MPSC channels for event propagation
    - Five event types: Created, StateChanged, StatsUpdate, Error, Closed
    - Optional periodic statistics reporting
@@ -110,19 +115,17 @@ This document records the requirements and specifications provided during the de
 1. TCP transport is a placeholder (not fully implemented)
 2. Latency metrics (avg_latency_ms) not yet calculated
 3. Primarily unidirectional traffic (client → destination)
-4. No RTCP support
-5. No packet validation or RTP header parsing
+4. No packet validation or RTP header parsing
 
 ### Future Considerations
 
 1. Complete TCP transport implementation
 2. Bidirectional RTP traffic handling
-3. RTCP support
-4. Packet validation and RTP header parsing
-5. Session persistence
-6. Authentication and authorization
-7. Rate limiting and traffic shaping
-8. Metrics export (Prometheus, etc.)
+3. Packet validation and RTP header parsing
+4. Session persistence
+5. Authentication and authorization
+6. Rate limiting and traffic shaping
+7. Metrics export (Prometheus, etc.)
 
 ---
 

@@ -6,6 +6,7 @@ A high-performance RTP (Real-time Transport Protocol) proxy server implemented i
 
 - **Multi-network Interface Support**: Bind to different network interfaces for listening and forwarding traffic
 - **Protocol Support**: Both UDP and TCP transport layers (UDP fully implemented)
+- **RTCP Support**: Automatic RTCP forwarding on port + 1 for UDP sessions
 - **gRPC Control Interface**: Modern API for session management and monitoring
 - **Real-time Statistics**: Track packets, bytes, packet loss rates, and session activity
 - **Event Streaming**: Subscribe to session state changes and statistics updates
@@ -183,9 +184,11 @@ grpcurl -plaintext -d '{
 
 ## Session Flow
 
-1. **SIP Controller** creates a session via `CreateSession`
-2. **Proxy** binds to the listen address and starts forwarding
-3. **Client** sends RTP packets to the listen address
+1. **SIP Controller** creates a session via `CreateSession` (specifying RTP port, e.g., 20000)
+2. **Proxy** automatically binds:
+   - RTP: listen address port 20000 → forward to destination port 30000
+   - RTCP: listen address port 20001 → forward to destination port 30001
+3. **Client** sends RTP packets to port 20000, RTCP to port 20001
 4. **Proxy** receives packets, updates statistics, and forwards to destination
 5. **Statistics** are collected and optionally streamed to the controller
 6. When done, **SIP Controller** destroys the session via `DestroySession`
@@ -230,6 +233,15 @@ rtpproxy/
 └── README.md
 ```
 
+## RTCP Support
+
+For UDP sessions, the proxy automatically handles RTCP traffic:
+- RTCP uses the same address as RTP but port + 1
+- Listen port 20000 (RTP) → automatically creates port 20001 (RTCP)
+- Forward port 20001 (RTP) → automatically creates port 20002 (RTCP)
+- Destination port 30000 (RTP) → RTCP forwarded to port 30001
+- Separate async task handles RTCP forwarding independently from RTP
+
 ## Current Limitations
 
 - **TCP Transport**: Currently a placeholder; only UDP is fully implemented
@@ -240,7 +252,6 @@ rtpproxy/
 
 - Complete TCP transport implementation
 - Bidirectional RTP traffic handling
-- RTCP support
 - Advanced packet manipulation (transcoding, filtering)
 - Persistent session storage
 - Authentication and authorization

@@ -9,6 +9,7 @@ use tracing::{debug, error, info};
 
 use crate::error::{ProxyError, Result};
 use crate::transport::{create_transport, TransportAdapter, TransportType};
+use tokio::net::UdpSocket;
 
 /// Session state enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,8 +141,12 @@ pub struct Session {
     pub last_activity: Arc<tokio::sync::RwLock<i64>>,
     pub error_message: Arc<tokio::sync::RwLock<Option<String>>>,
     transport: Arc<Box<dyn TransportAdapter>>,
+    // RTCP sockets for UDP (None for TCP)
+    rtcp_listen_socket: Option<Arc<UdpSocket>>,
+    rtcp_forward_socket: Option<Arc<UdpSocket>>,
     stop_tx: broadcast::Sender<()>,
     task_handle: Option<JoinHandle<()>>,
+    rtcp_task_handle: Option<JoinHandle<()>>,
 }
 
 impl Session {
@@ -166,6 +171,24 @@ impl Session {
 
         let (stop_tx, _stop_rx) = broadcast::channel::<()>(1);
 
+        // Create RTCP sockets for UDP protocol
+        let (rtcp_listen_socket, rtcp_forward_socket) = if matches!(config.protocol, TransportType::Udp) {
+            let rtcp_listen_addr = increment_port_addr(config.listen_addr)?;
+            let rtcp_forward_addr = increment_port_addr(config.forward_addr)?;
+
+            let rtcp_listen = UdpSocket::bind(rtcp_listen_addr).await
+                .map_err(|e| ProxyError::Transport(format!("Failed to bind RTCP listen socket: {}", e)))?;
+            info!("Session {}: RTCP listen socket bound to {}", session_id, rtcp_listen.local_addr()?);
+
+            let rtcp_forward = UdpSocket::bind(rtcp_forward_addr).await
+                .map_err(|e| ProxyError::Transport(format!("Failed to bind RTCP forward socket: {}", e)))?;
+            info!("Session {}: RTCP forward socket bound to {}", session_id, rtcp_forward.local_addr()?);
+
+            (Some(Arc::new(rtcp_listen)), Some(Arc::new(rtcp_forward)))
+        } else {
+            (None, None)
+        };
+
         let session = Self {
             id: session_id.clone(),
             config: config.clone(),
@@ -175,8 +198,11 @@ impl Session {
             last_activity: Arc::new(tokio::sync::RwLock::new(created_at)),
             error_message: Arc::new(tokio::sync::RwLock::new(None)),
             transport: Arc::new(transport),
+            rtcp_listen_socket,
+            rtcp_forward_socket,
             stop_tx,
             task_handle: None,
+            rtcp_task_handle: None,
         };
 
         // Send creation event
@@ -273,6 +299,11 @@ impl Session {
 
         self.task_handle = Some(task_handle);
 
+        // Start RTCP forwarding task for UDP sessions
+        if matches!(self.config.protocol, TransportType::Udp) {
+            self.start_rtcp_forwarding()?;
+        }
+
         // Start statistics reporting task if interval is configured
         if self.config.stats_interval_seconds > 0 {
             let session_id = self.id.clone();
@@ -308,8 +339,13 @@ impl Session {
         // Send stop signal
         let _ = self.stop_tx.send(());
 
-        // Wait for task to finish
+        // Wait for RTP task to finish
         if let Some(handle) = self.task_handle.take() {
+            let _ = handle.await;
+        }
+
+        // Wait for RTCP task to finish
+        if let Some(handle) = self.rtcp_task_handle.take() {
             let _ = handle.await;
         }
 
@@ -341,6 +377,63 @@ impl Session {
 
     pub fn get_stats_snapshot(&self) -> TrafficStatsSnapshot {
         self.stats.get_snapshot()
+    }
+
+    /// Start RTCP forwarding task
+    fn start_rtcp_forwarding(&mut self) -> Result<()> {
+        let rtcp_listen = self.rtcp_listen_socket.as_ref()
+            .ok_or_else(|| ProxyError::Transport("RTCP listen socket not available".to_string()))?
+            .clone();
+        let rtcp_forward = self.rtcp_forward_socket.as_ref()
+            .ok_or_else(|| ProxyError::Transport("RTCP forward socket not available".to_string()))?
+            .clone();
+
+        let session_id = self.id.clone();
+        let destination = increment_port_addr(self.config.destination_addr)?;
+        let mut stop_rx = self.stop_tx.subscribe();
+
+        info!("Starting RTCP forwarding for session {}", session_id);
+
+        let rtcp_handle = tokio::spawn(async move {
+            info!("Session {} RTCP forwarding task started", session_id);
+
+            loop {
+                let mut buf = vec![0u8; 65535];
+
+                tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("Session {} RTCP task received stop signal", session_id);
+                        break;
+                    }
+                    recv_result = rtcp_listen.recv_from(&mut buf) => {
+                        match recv_result {
+                            Ok((len, src)) => {
+                                debug!("Session {}: received RTCP {} bytes from {}", session_id, len, src);
+
+                                // Forward RTCP packet to destination
+                                match rtcp_forward.send_to(&buf[..len], destination).await {
+                                    Ok(sent) => {
+                                        debug!("Session {}: forwarded RTCP {} bytes to {}", session_id, sent, destination);
+                                    }
+                                    Err(e) => {
+                                        error!("Session {}: failed to forward RTCP: {}", session_id, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Session {}: RTCP recv error: {}", session_id, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Session {} RTCP forwarding task stopped", session_id);
+        });
+
+        self.rtcp_task_handle = Some(rtcp_handle);
+        Ok(())
     }
 }
 
@@ -486,4 +579,13 @@ fn current_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// Increment port number by 1 for RTCP
+fn increment_port_addr(addr: SocketAddr) -> Result<SocketAddr> {
+    let mut new_addr = addr;
+    let new_port = addr.port().checked_add(1)
+        .ok_or_else(|| ProxyError::Transport("Port overflow when calculating RTCP port".to_string()))?;
+    new_addr.set_port(new_port);
+    Ok(new_addr)
 }
