@@ -8,8 +8,31 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
 use crate::error::{ProxyError, Result};
-use crate::transport::{create_transport, TransportAdapter, TransportType};
-use tokio::net::UdpSocket;
+use crate::transport::{create_transport, TransportAdapter, TransportType, UdpTransport};
+use async_trait::async_trait;
+use bytes::Bytes;
+
+/// Wrapper for UdpTransport to implement TransportAdapter for Arc<UdpTransport>
+struct UdpTransportWrapper(Arc<UdpTransport>);
+
+#[async_trait]
+impl TransportAdapter for UdpTransportWrapper {
+    async fn start(&self) -> Result<()> {
+        self.0.start().await
+    }
+
+    async fn recv(&self) -> Result<(Bytes, SocketAddr)> {
+        self.0.recv().await
+    }
+
+    async fn send(&self, data: Bytes, dest: SocketAddr) -> Result<usize> {
+        self.0.send(data, dest).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.0.close().await
+    }
+}
 
 /// Session state enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,12 +164,13 @@ pub struct Session {
     pub last_activity: Arc<tokio::sync::RwLock<i64>>,
     pub error_message: Arc<tokio::sync::RwLock<Option<String>>>,
     transport: Arc<Box<dyn TransportAdapter>>,
-    // RTCP sockets for UDP (None for TCP)
-    rtcp_listen_socket: Option<Arc<UdpSocket>>,
-    rtcp_forward_socket: Option<Arc<UdpSocket>>,
+    // Store UDP transport separately to access RTCP sockets
+    udp_transport: Option<Arc<UdpTransport>>,
     stop_tx: broadcast::Sender<()>,
     task_handle: Option<JoinHandle<()>>,
+    reverse_rtp_task_handle: Option<JoinHandle<()>>,
     rtcp_task_handle: Option<JoinHandle<()>>,
+    reverse_rtcp_task_handle: Option<JoinHandle<()>>,
 }
 
 impl Session {
@@ -162,32 +186,24 @@ impl Session {
             session_id, config.listen_addr, config.forward_addr, config.destination_addr, config.protocol);
 
         // Create transport adapter
-        let transport = create_transport(
-            config.protocol.clone(),
-            config.listen_addr,
-            config.forward_addr,
-        )
-        .await?;
+        // For UDP, create and store the UdpTransport to access RTCP sockets
+        let (transport, udp_transport): (Box<dyn TransportAdapter>, Option<Arc<UdpTransport>>) =
+            if matches!(config.protocol, TransportType::Udp) {
+                let udp = UdpTransport::new(config.listen_addr, config.forward_addr).await?;
+                let udp_arc = Arc::new(udp);
+                // Clone the Arc and box it as a trait object
+                let boxed: Box<dyn TransportAdapter> = Box::new(UdpTransportWrapper(Arc::clone(&udp_arc)));
+                (boxed, Some(udp_arc))
+            } else {
+                let transport = create_transport(
+                    config.protocol.clone(),
+                    config.listen_addr,
+                    config.forward_addr,
+                ).await?;
+                (transport, None)
+            };
 
         let (stop_tx, _stop_rx) = broadcast::channel::<()>(1);
-
-        // Create RTCP sockets for UDP protocol
-        let (rtcp_listen_socket, rtcp_forward_socket) = if matches!(config.protocol, TransportType::Udp) {
-            let rtcp_listen_addr = increment_port_addr(config.listen_addr)?;
-            let rtcp_forward_addr = increment_port_addr(config.forward_addr)?;
-
-            let rtcp_listen = UdpSocket::bind(rtcp_listen_addr).await
-                .map_err(|e| ProxyError::Transport(format!("Failed to bind RTCP listen socket: {}", e)))?;
-            info!("Session {}: RTCP listen socket bound to {}", session_id, rtcp_listen.local_addr()?);
-
-            let rtcp_forward = UdpSocket::bind(rtcp_forward_addr).await
-                .map_err(|e| ProxyError::Transport(format!("Failed to bind RTCP forward socket: {}", e)))?;
-            info!("Session {}: RTCP forward socket bound to {}", session_id, rtcp_forward.local_addr()?);
-
-            (Some(Arc::new(rtcp_listen)), Some(Arc::new(rtcp_forward)))
-        } else {
-            (None, None)
-        };
 
         let session = Self {
             id: session_id.clone(),
@@ -198,11 +214,12 @@ impl Session {
             last_activity: Arc::new(tokio::sync::RwLock::new(created_at)),
             error_message: Arc::new(tokio::sync::RwLock::new(None)),
             transport: Arc::new(transport),
-            rtcp_listen_socket,
-            rtcp_forward_socket,
+            udp_transport,
             stop_tx,
             task_handle: None,
+            reverse_rtp_task_handle: None,
             rtcp_task_handle: None,
+            reverse_rtcp_task_handle: None,
         };
 
         // Send creation event
@@ -299,9 +316,11 @@ impl Session {
 
         self.task_handle = Some(task_handle);
 
-        // Start RTCP forwarding task for UDP sessions
+        // Start reverse RTP forwarding and RTCP tasks for UDP sessions
         if matches!(self.config.protocol, TransportType::Udp) {
+            self.start_reverse_rtp_forwarding()?;
             self.start_rtcp_forwarding()?;
+            self.start_reverse_rtcp_forwarding()?;
         }
 
         // Start statistics reporting task if interval is configured
@@ -344,8 +363,18 @@ impl Session {
             let _ = handle.await;
         }
 
+        // Wait for reverse RTP task to finish
+        if let Some(handle) = self.reverse_rtp_task_handle.take() {
+            let _ = handle.await;
+        }
+
         // Wait for RTCP task to finish
         if let Some(handle) = self.rtcp_task_handle.take() {
+            let _ = handle.await;
+        }
+
+        // Wait for reverse RTCP task to finish
+        if let Some(handle) = self.reverse_rtcp_task_handle.take() {
             let _ = handle.await;
         }
 
@@ -381,12 +410,12 @@ impl Session {
 
     /// Start RTCP forwarding task
     fn start_rtcp_forwarding(&mut self) -> Result<()> {
-        let rtcp_listen = self.rtcp_listen_socket.as_ref()
-            .ok_or_else(|| ProxyError::Transport("RTCP listen socket not available".to_string()))?
-            .clone();
-        let rtcp_forward = self.rtcp_forward_socket.as_ref()
-            .ok_or_else(|| ProxyError::Transport("RTCP forward socket not available".to_string()))?
-            .clone();
+        // Get RTCP sockets from UdpTransport
+        let udp_transport = self.udp_transport.as_ref()
+            .ok_or_else(|| ProxyError::Transport("UDP transport not available for RTCP".to_string()))?;
+
+        let rtcp_listen = udp_transport.rtcp_listen_socket();
+        let rtcp_forward = udp_transport.rtcp_forward_socket();
 
         let session_id = self.id.clone();
         let destination = increment_port_addr(self.config.destination_addr)?;
@@ -433,6 +462,124 @@ impl Session {
         });
 
         self.rtcp_task_handle = Some(rtcp_handle);
+        Ok(())
+    }
+
+    /// Start reverse RTP forwarding task (destination -> client)
+    fn start_reverse_rtp_forwarding(&mut self) -> Result<()> {
+        // Get RTP sockets from UdpTransport
+        let udp_transport = self.udp_transport.as_ref()
+            .ok_or_else(|| ProxyError::Transport("UDP transport not available for reverse RTP".to_string()))?;
+
+        let rtp_listen = udp_transport.rtp_listen_socket();
+        let rtp_forward = udp_transport.rtp_forward_socket();
+
+        let session_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
+        let last_activity = Arc::clone(&self.last_activity);
+        let mut stop_rx = self.stop_tx.subscribe();
+
+        info!("Starting reverse RTP forwarding for session {}", session_id);
+
+        let reverse_handle = tokio::spawn(async move {
+            info!("Session {} reverse RTP forwarding task started", session_id);
+
+            loop {
+                let mut buf = vec![0u8; 65535];
+
+                tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("Session {} reverse RTP task received stop signal", session_id);
+                        break;
+                    }
+                    recv_result = rtp_forward.recv_from(&mut buf) => {
+                        match recv_result {
+                            Ok((len, src)) => {
+                                debug!("Session {}: received reverse RTP {} bytes from {}", session_id, len, src);
+                                stats.record_received(len as u64);
+                                *last_activity.write().await = current_timestamp();
+
+                                // Forward back to client via listen socket
+                                match rtp_listen.send_to(&buf[..len], src).await {
+                                    Ok(sent) => {
+                                        stats.record_sent(sent as u64);
+                                        debug!("Session {}: forwarded reverse RTP {} bytes to client", session_id, sent);
+                                    }
+                                    Err(e) => {
+                                        error!("Session {}: failed to forward reverse RTP: {}", session_id, e);
+                                        stats.record_lost();
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Session {}: reverse RTP recv error: {}", session_id, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Session {} reverse RTP forwarding task stopped", session_id);
+        });
+
+        self.reverse_rtp_task_handle = Some(reverse_handle);
+        Ok(())
+    }
+
+    /// Start reverse RTCP forwarding task (destination -> client)
+    fn start_reverse_rtcp_forwarding(&mut self) -> Result<()> {
+        // Get RTCP sockets from UdpTransport
+        let udp_transport = self.udp_transport.as_ref()
+            .ok_or_else(|| ProxyError::Transport("UDP transport not available for reverse RTCP".to_string()))?;
+
+        let rtcp_listen = udp_transport.rtcp_listen_socket();
+        let rtcp_forward = udp_transport.rtcp_forward_socket();
+
+        let session_id = self.id.clone();
+        let mut stop_rx = self.stop_tx.subscribe();
+
+        info!("Starting reverse RTCP forwarding for session {}", session_id);
+
+        let reverse_rtcp_handle = tokio::spawn(async move {
+            info!("Session {} reverse RTCP forwarding task started", session_id);
+
+            loop {
+                let mut buf = vec![0u8; 65535];
+
+                tokio::select! {
+                    _ = stop_rx.recv() => {
+                        info!("Session {} reverse RTCP task received stop signal", session_id);
+                        break;
+                    }
+                    recv_result = rtcp_forward.recv_from(&mut buf) => {
+                        match recv_result {
+                            Ok((len, src)) => {
+                                debug!("Session {}: received reverse RTCP {} bytes from {}", session_id, len, src);
+
+                                // Forward RTCP packet back to client
+                                match rtcp_listen.send_to(&buf[..len], src).await {
+                                    Ok(sent) => {
+                                        debug!("Session {}: forwarded reverse RTCP {} bytes to client", session_id, sent);
+                                    }
+                                    Err(e) => {
+                                        error!("Session {}: failed to forward reverse RTCP: {}", session_id, e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Session {}: reverse RTCP recv error: {}", session_id, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            info!("Session {} reverse RTCP forwarding task stopped", session_id);
+        });
+
+        self.reverse_rtcp_task_handle = Some(reverse_rtcp_handle);
         Ok(())
     }
 }

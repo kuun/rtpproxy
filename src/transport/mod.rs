@@ -69,6 +69,16 @@ impl UdpTransport {
         })
     }
 
+    /// Get RTP listen socket for bidirectional communication
+    pub fn rtp_listen_socket(&self) -> Arc<UdpSocket> {
+        Arc::clone(&self.rtp_listen_socket)
+    }
+
+    /// Get RTP forward socket for bidirectional communication
+    pub fn rtp_forward_socket(&self) -> Arc<UdpSocket> {
+        Arc::clone(&self.rtp_forward_socket)
+    }
+
     /// Get RTCP listen socket for concurrent receiving
     pub fn rtcp_listen_socket(&self) -> Arc<UdpSocket> {
         Arc::clone(&self.rtcp_listen_socket)
