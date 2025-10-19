@@ -11,7 +11,7 @@ echo ""
 # 1. Create a session
 echo "1. Creating a new session..."
 SESSION_ID="example-session-$(date +%s)"
-SESSION_RESPONSE=$(grpcurl -plaintext -d "{
+SESSION_RESPONSE=$(grpcurl --proto proto/rtpproxy.proto -plaintext -d "{
   \"session_id\": \"$SESSION_ID\",
   \"listen_endpoint\": {\"address\": \"0.0.0.0\", \"port\": 20000},
   \"forward_endpoint\": {\"address\": \"0.0.0.0\", \"port\": 20001},

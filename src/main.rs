@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_server = create_grpc_server(Arc::clone(&session_manager));
 
     // Server address
-    let addr = "[::]:50051".parse()?;
+    let addr = "0.0.0.0:50051".parse()?;
     info!("gRPC server listening on {}", addr);
 
     // Start server
