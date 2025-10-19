@@ -13,8 +13,8 @@ echo "1. Creating a new session..."
 SESSION_ID="example-session-$(date +%s)"
 SESSION_RESPONSE=$(grpcurl --proto proto/rtpproxy.proto -plaintext -d "{
   \"session_id\": \"$SESSION_ID\",
-  \"listen_endpoint\": {\"address\": \"0.0.0.0\", \"port\": 20000},
-  \"forward_endpoint\": {\"address\": \"0.0.0.0\", \"port\": 20001},
+  \"listen_endpoint\": {\"address\": \"127.0.0.2\", \"port\": 20000},
+  \"forward_endpoint\": {\"address\": \"127.0.0.3\", \"port\": 20000},
   \"destination_endpoint\": {\"address\": \"127.0.0.1\", \"port\": 30000},
   \"protocol\": 1,
   \"timeout_seconds\": 0,

@@ -13,8 +13,11 @@ use session::SessionManager;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing/logging
+    // Initialize tracing/logging with file and line number
     tracing_subscriber::fmt()
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(true)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
