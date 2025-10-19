@@ -259,9 +259,44 @@ impl Session {
             self.start_reverse_rtcp_forwarding()?;
         }
 
-        // Start reverse RTP forwarding for TCP sessions
+        // For TCP sessions, wait for both connections then start reverse forwarding
         if matches!(self.config.protocol, TransportType::Tcp) {
-            self.start_reverse_tcp_forwarding()?;
+            if let Some(ref tcp_transport) = self.tcp_transport {
+                let tcp_clone = Arc::clone(tcp_transport);
+                let session_id = self.id.clone();
+                let event_tx_clone = event_tx.clone();
+                let mut stop_rx = self.stop_tx.subscribe();
+
+                // Spawn a task to wait for connections and then start reverse forwarding
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = stop_rx.recv() => {
+                            info!("Session {} stopped before TCP connections established", session_id);
+                            return;
+                        }
+                        result = tcp_clone.wait_for_connections() => {
+                            match result {
+                                Ok(()) => {
+                                    info!("Session {} TCP connections established, reverse forwarding will be started by main task", session_id);
+                                }
+                                Err(e) => {
+                                    error!("Session {} error waiting for TCP connections: {}", session_id, e);
+                                    let _ = event_tx_clone.send(SessionEvent::Error {
+                                        session_id: session_id.clone(),
+                                        error: e.to_string(),
+                                        timestamp: current_timestamp(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Wait for connections before starting reverse forwarding
+                tcp_transport.wait_for_connections().await?;
+                info!("TCP connections established for session {}, starting reverse forwarding", self.id);
+                self.start_reverse_tcp_forwarding()?;
+            }
         }
 
         // Start statistics reporting task if interval is configured
@@ -513,7 +548,7 @@ impl Session {
 
         let client_stream = tcp_transport.client_stream();
         let dest_stream = tcp_transport.dest_stream();
-        let client_addr = tcp_transport.client_addr();
+        let client_addr_cell = tcp_transport.client_addr_cell();
 
         let session_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
@@ -525,23 +560,10 @@ impl Session {
         let handle = tokio::spawn(async move {
             info!("Session {} reverse TCP forwarding task started", session_id);
 
-            // Wait for both streams to be available
-            loop {
-                let client_ready = client_stream.lock().await.is_some();
-                let dest_ready = dest_stream.lock().await.is_some();
-
-                if client_ready && dest_ready {
-                    break;
-                }
-
-                tokio::select! {
-                    _ = stop_rx.recv() => {
-                        info!("Session {} reverse TCP task received stop signal before streams ready", session_id);
-                        return;
-                    }
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
-                }
-            }
+            // Get client address once at the beginning (it won't change during the session)
+            let client_addr_val = client_addr_cell.get()
+                .copied()
+                .unwrap_or_else(|| "unknown".parse().unwrap());
 
             loop {
                 tokio::select! {
@@ -567,9 +589,6 @@ impl Session {
                                     debug!("Session {}: received reverse TCP {} bytes from destination", session_id, len);
                                     stats.record_received(len as u64);
                                     *last_activity.write().await = current_timestamp();
-
-                                    // Get client address for logging
-                                    let client_addr_val = client_addr.lock().await.unwrap_or_else(|| "unknown".parse().unwrap());
 
                                     // Forward to client
                                     let mut client_guard = client_stream.lock().await;

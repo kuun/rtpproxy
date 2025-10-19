@@ -144,10 +144,13 @@ impl TransportAdapter for UdpTransport {
 
 /// TCP transport adapter implementation
 pub struct TcpTransport {
-    listener: Arc<TcpListener>,
+    listener: tokio::sync::Mutex<Option<TcpListener>>,
+    destination_addr: SocketAddr,
     client_stream: Arc<tokio::sync::Mutex<Option<TcpStream>>>,
     dest_stream: Arc<tokio::sync::Mutex<Option<TcpStream>>>,
-    client_addr: Arc<tokio::sync::Mutex<Option<SocketAddr>>>,
+    client_addr: Arc<tokio::sync::OnceCell<SocketAddr>>,
+    /// Notify when both connections are established
+    connections_ready: Arc<tokio::sync::Notify>,
 }
 
 impl TcpTransport {
@@ -160,10 +163,12 @@ impl TcpTransport {
         info!("TCP listener bound to {}", listener.local_addr()?);
 
         Ok(Self {
-            listener: Arc::new(listener),
+            listener: tokio::sync::Mutex::new(Some(listener)),
+            destination_addr: forward_addr,
             client_stream: Arc::new(tokio::sync::Mutex::new(None)),
             dest_stream: Arc::new(tokio::sync::Mutex::new(None)),
-            client_addr: Arc::new(tokio::sync::Mutex::new(None)),
+            client_addr: Arc::new(tokio::sync::OnceCell::new()),
+            connections_ready: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -177,34 +182,77 @@ impl TcpTransport {
         Arc::clone(&self.dest_stream)
     }
 
-    /// Get client address
-    pub fn client_addr(&self) -> Arc<tokio::sync::Mutex<Option<SocketAddr>>> {
+    /// Get client address (returns None if client not yet connected)
+    pub fn client_addr(&self) -> Option<SocketAddr> {
+        self.client_addr.get().copied()
+    }
+
+    /// Get client address cell for sharing across tasks
+    pub fn client_addr_cell(&self) -> Arc<tokio::sync::OnceCell<SocketAddr>> {
         Arc::clone(&self.client_addr)
     }
 
-    /// Accept client connection
+    /// Accept client connection and immediately connect to destination
+    /// The listener is closed after accepting the first connection
     async fn accept_client(&self) -> Result<()> {
-        let (stream, addr) = self.listener.accept().await
+        // Take the listener from Option (can only be called once)
+        let listener = self.listener.lock().await.take()
+            .ok_or_else(|| ProxyError::Transport("Listener already closed".to_string()))?;
+
+        // Accept the first connection
+        let (stream, addr) = listener.accept().await
             .map_err(|e| ProxyError::Transport(format!("Failed to accept connection: {}", e)))?;
 
         info!("Accepted TCP connection from {}", addr);
 
+        // Listener is dropped here, closing it after first connection
+        drop(listener);
+        info!("TCP listener closed after accepting first connection");
+
+        // Store client stream and address
         *self.client_stream.lock().await = Some(stream);
-        *self.client_addr.lock().await = Some(addr);
+        let _ = self.client_addr.set(addr); // Set once, ignore if already set
+
+        // Immediately connect to destination
+        info!("Connecting to TCP destination {} immediately after accepting client", self.destination_addr);
+        let dest_stream = TcpStream::connect(self.destination_addr).await
+            .map_err(|e| ProxyError::Transport(format!("Failed to connect to destination: {}", e)))?;
+
+        info!("Connected to TCP destination {}", self.destination_addr);
+        *self.dest_stream.lock().await = Some(dest_stream);
+
+        // Notify all waiters that both connections are ready
+        self.connections_ready.notify_waiters();
 
         Ok(())
     }
 
-    /// Connect to destination
-    async fn connect_destination(&self, dest_addr: SocketAddr) -> Result<()> {
-        info!("Connecting to TCP destination {}", dest_addr);
+    /// Check if both client and destination are connected
+    pub fn is_fully_connected(&self) -> bool {
+        // This is a non-blocking check, but for simplicity we use try_lock
+        // In production, you might want a more robust approach
+        if let Ok(client) = self.client_stream.try_lock() {
+            if let Ok(dest) = self.dest_stream.try_lock() {
+                return client.is_some() && dest.is_some();
+            }
+        }
+        false
+    }
 
-        let stream = TcpStream::connect(dest_addr).await
-            .map_err(|e| ProxyError::Transport(format!("Failed to connect to destination: {}", e)))?;
+    /// Wait until both client and destination connections are established
+    pub async fn wait_for_connections(&self) -> Result<()> {
+        // Check if already connected
+        {
+            let client_ready = self.client_stream.lock().await.is_some();
+            let dest_ready = self.dest_stream.lock().await.is_some();
 
-        info!("Connected to TCP destination {}", dest_addr);
+            if client_ready && dest_ready {
+                return Ok(());
+            }
+        }
 
-        *self.dest_stream.lock().await = Some(stream);
+        // Wait for notification that connections are ready
+        self.connections_ready.notified().await;
 
         Ok(())
     }
@@ -228,10 +276,9 @@ impl TransportAdapter for TcpTransport {
         }
 
         // Get client address
-        let client_addr = {
-            let addr = self.client_addr.lock().await;
-            addr.ok_or_else(|| ProxyError::Transport("Client address not available".to_string()))?
-        };
+        let client_addr = self.client_addr.get()
+            .copied()
+            .ok_or_else(|| ProxyError::Transport("Client address not available".to_string()))?;
 
         // Read data from client
         let mut stream_guard = self.client_stream.lock().await;
@@ -256,16 +303,8 @@ impl TransportAdapter for TcpTransport {
         }
     }
 
-    async fn send(&self, data: Bytes, dest: SocketAddr) -> Result<usize> {
-        // Connect to destination if not already connected
-        {
-            let dest_stream = self.dest_stream.lock().await;
-            if dest_stream.is_none() {
-                drop(dest_stream);
-                self.connect_destination(dest).await?;
-            }
-        }
-
+    async fn send(&self, data: Bytes, _dest: SocketAddr) -> Result<usize> {
+        // Destination should already be connected by accept_client()
         // Write data to destination
         let mut stream_guard = self.dest_stream.lock().await;
         let stream = stream_guard.as_mut()
@@ -273,7 +312,7 @@ impl TransportAdapter for TcpTransport {
 
         match stream.write_all(&data).await {
             Ok(_) => {
-                debug!("Sent TCP {} bytes to {}", data.len(), dest);
+                debug!("Sent TCP {} bytes to destination", data.len());
                 Ok(data.len())
             }
             Err(e) => {
