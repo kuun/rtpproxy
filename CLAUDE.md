@@ -83,6 +83,33 @@ This document records the requirements and specifications provided during the de
 2. **Comments and Logs**: All comments and log messages must be in English
 3. **Network Interface**: Endpoint message should NOT include interface field (only address and port)
 4. **Session ID**: Session ID must be user-specified (string type) when creating a session via gRPC API, not auto-generated
+5. **Logging**: Log output must include file name and line number for debugging
+
+### Git Commit Requirements
+
+**Date**: 2025-10-19
+
+1. **Commit Message Format**: Follow conventional commits format
+   - Use prefixes: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, etc.
+   - First line: concise summary (50-72 characters)
+   - Blank line, then detailed description with bullet points
+
+2. **Commit Message Content**:
+   - Must be in English
+   - Must NOT include auto-generated footers:
+     - ❌ Do NOT include: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
+     - ❌ Do NOT include: `Co-Authored-By: Claude <noreply@anthropic.com>`
+   - Should focus on what changed and why
+
+3. **Example**:
+   ```
+   feat: add RTCP support for UDP sessions
+
+   - Implement automatic RTCP forwarding on port + 1
+   - Create separate RTCP sockets for each UDP session
+   - Add dedicated async task for RTCP packet forwarding
+   - Update documentation with RTCP details
+   ```
 
 ### Technical Decisions Made
 
