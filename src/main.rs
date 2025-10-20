@@ -3,11 +3,13 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber;
 
+mod config;
 mod error;
 mod grpc_server;
 mod session;
 mod transport;
 
+use config::Config;
 use grpc_server::create_grpc_server;
 use session::SessionManager;
 
@@ -26,6 +28,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting RTP Proxy server");
 
+    // Load configuration
+    let config = Config::load("config.toml");
+    info!("Configuration loaded: {:?}", config);
+
     // Create session manager
     let session_manager = Arc::new(SessionManager::new());
     info!("Session manager initialized");
@@ -33,8 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create gRPC server
     let grpc_server = create_grpc_server(Arc::clone(&session_manager));
 
-    // Server address
-    let addr = "0.0.0.0:50051".parse()?;
+    // Server address from config
+    let addr = config.grpc_address().parse()?;
     info!("gRPC server listening on {}", addr);
 
     // Start server

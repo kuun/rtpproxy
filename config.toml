@@ -1,0 +1,8 @@
+# RTP Proxy Configuration
+
+[server]
+# gRPC server listen address
+grpc_listen_address = "0.0.0.0"
+
+# gRPC server listen port
+grpc_listen_port = 50051
