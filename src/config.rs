@@ -20,16 +20,45 @@ impl Default for ServerConfig {
     }
 }
 
+/// Logging configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoggingConfig {
+    /// Enable file logging
+    pub file_enabled: bool,
+    /// Log directory path
+    pub directory: String,
+    /// Log file name prefix
+    pub file_prefix: String,
+    /// Maximum log file size in MB (default: 100)
+    pub max_file_size: u64,
+    /// Maximum number of log files to keep (default: 5)
+    pub max_log_files: usize,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            file_enabled: true,
+            directory: "./logs".to_string(),
+            file_prefix: "rtpproxy".to_string(),
+            max_file_size: 100, // 100 MB
+            max_log_files: 5,
+        }
+    }
+}
+
 /// Application configuration
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
+    pub logging: LoggingConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             server: ServerConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }
