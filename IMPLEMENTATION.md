@@ -26,10 +26,13 @@ This is a production-ready RTP proxy server implemented in Rust 2024 Edition wit
 - Supports binding to specific network interfaces
 - Non-blocking async I/O
 - Maximum packet size: 65535 bytes (UDP MTU)
+- Automatic RTCP support on port + 1
 
-**TCP Transport** (Framework Only):
-- Placeholder implementation for future development
-- Structure prepared for connection management
+**TCP Transport** (Implemented):
+- Bidirectional TCP forwarding support
+- Connection lifecycle management
+- Async I/O for both client and destination connections
+- Graceful connection shutdown
 
 ### 2. Session Management (`src/session/mod.rs`)
 
@@ -186,33 +189,30 @@ nc -u -l 30000
 
 ## Known Issues and Limitations
 
-1. **TCP Support**: Not implemented (returns error)
-2. **Latency Metrics**: avg_latency_ms always returns 0.0
-3. **Bidirectional Traffic**: No reverse path support
-4. **RTCP**: Not handled
-5. **Packet Validation**: No RTP header parsing/validation
-6. **Session Persistence**: In-memory only (lost on restart)
-7. **Authentication**: No access control
-8. **Rate Limiting**: No traffic shaping
+1. **Latency Metrics**: avg_latency_ms always returns 0.0
+2. **Packet Validation**: No RTP header parsing/validation
+3. **Session Persistence**: In-memory only (lost on restart)
+4. **Authentication**: No access control
+5. **Rate Limiting**: No traffic shaping
 
 ## Future Work
 
 **High Priority**:
-- TCP transport implementation
-- Bidirectional RTP support
 - Unit and integration tests
-
-**Medium Priority**:
-- RTCP handling
-- RTP header parsing
 - Latency measurements
 - Session timeout enforcement
+
+**Medium Priority**:
+- RTP header parsing and validation
+- Packet validation and filtering
+- Enhanced error recovery
 
 **Low Priority**:
 - Persistent session storage
 - gRPC authentication
 - Prometheus metrics
 - Admin web UI
+- Rate limiting and traffic shaping
 
 ## Security Considerations
 

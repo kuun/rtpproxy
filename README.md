@@ -5,8 +5,9 @@ A high-performance RTP (Real-time Transport Protocol) proxy server implemented i
 ## Features
 
 - **Multi-network Interface Support**: Bind to different network interfaces for listening and forwarding traffic
-- **Protocol Support**: Both UDP and TCP transport layers (UDP fully implemented)
+- **Protocol Support**: Both UDP and TCP transport layers fully implemented
 - **RTCP Support**: Automatic RTCP forwarding on port + 1 for UDP sessions
+- **Bidirectional TCP Forwarding**: Full duplex TCP connection support
 - **gRPC Control Interface**: Modern API for session management and monitoring
 - **Real-time Statistics**: Track packets, bytes, packet loss rates, and session activity
 - **Event Streaming**: Subscribe to session state changes and statistics updates
@@ -244,18 +245,19 @@ For UDP sessions, the proxy automatically handles RTCP traffic:
 
 ## Current Limitations
 
-- **TCP Transport**: Currently a placeholder; only UDP is fully implemented
 - **Latency Metrics**: Average latency calculation not yet implemented
-- **Bidirectional Traffic**: Current implementation is primarily unidirectional (client → destination)
+- **Packet Validation**: No RTP header parsing or validation
+- **Session Persistence**: In-memory only (sessions lost on restart)
 
 ## Future Enhancements
 
-- Complete TCP transport implementation
-- Bidirectional RTP traffic handling
+- Latency measurement and monitoring
+- RTP header parsing and validation
 - Advanced packet manipulation (transcoding, filtering)
 - Persistent session storage
 - Authentication and authorization
 - Metrics export (Prometheus, etc.)
+- Rate limiting and traffic shaping
 
 ## License
 
