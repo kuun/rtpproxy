@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use logroller::{LogRollerBuilder, Rotation, RotationSize};
+use std::{env, sync::Arc};
 use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{self, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-use logroller::{LogRollerBuilder, Rotation, RotationSize};
 
 mod config;
 mod error;
@@ -13,6 +13,54 @@ mod transport;
 use config::{Config, LoggingConfig};
 use grpc_server::create_grpc_server;
 use session::SessionManager;
+
+const DEFAULT_CONFIG_PATH: &str = "config.toml";
+
+struct CliOptions {
+    config_path: String,
+}
+
+fn print_usage(program_name: &str) {
+    println!("Usage: {} [--config <path>]", program_name);
+    println!(
+        "    -c, --config <path>    Path to configuration file (default: {})",
+        DEFAULT_CONFIG_PATH
+    );
+    println!("    -h, --help             Show this help message");
+}
+
+fn parse_cli_options() -> CliOptions {
+    let mut args = env::args();
+    let program_name = args.next().unwrap_or_else(|| String::from("rtpproxy"));
+
+    let mut config_path = DEFAULT_CONFIG_PATH.to_string();
+    let mut iter = args;
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--config" | "-c" => {
+                if let Some(path) = iter.next() {
+                    config_path = path;
+                } else {
+                    eprintln!("Missing value for {}", arg);
+                    print_usage(&program_name);
+                    std::process::exit(1);
+                }
+            }
+            "--help" | "-h" => {
+                print_usage(&program_name);
+                std::process::exit(0);
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", arg);
+                print_usage(&program_name);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    CliOptions { config_path }
+}
 
 /// Initialize logging system with either console or file output
 fn initialize_logging(logging_config: &LoggingConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -29,7 +77,9 @@ fn initialize_logging(logging_config: &LoggingConfig) -> Result<(), Box<dyn std:
 
         // Create logroller appender with size-based rotation
         let appender = LogRollerBuilder::new(&logging_config.directory, &log_filename)
-            .rotation(Rotation::SizeBased(RotationSize::MB(logging_config.max_file_size)))
+            .rotation(Rotation::SizeBased(RotationSize::MB(
+                logging_config.max_file_size,
+            )))
             .max_keep_files(logging_config.max_log_files as u64)
             .build()?;
 
@@ -80,12 +130,15 @@ fn initialize_logging(logging_config: &LoggingConfig) -> Result<(), Box<dyn std:
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli_options = parse_cli_options();
+
     // Load configuration
-    let config = Config::load("config.toml");
+    let config = Config::load(&cli_options.config_path);
 
     // Initialize logging system
     initialize_logging(&config.logging)?;
 
+    info!("Using configuration file: {}", cli_options.config_path);
     info!("Starting RTP Proxy server");
     info!("Configuration loaded: {:?}", config);
 

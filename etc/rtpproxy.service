@@ -1,0 +1,19 @@
+[Unit]
+Description=RTP Proxy Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rtpproxy
+Group=rtpproxy
+WorkingDirectory=/opt/rtpproxy
+ExecStart=/opt/rtpproxy/bin/rtpproxy --config /opt/rtpproxy/etc/config.toml
+Restart=always
+RestartSec=2
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

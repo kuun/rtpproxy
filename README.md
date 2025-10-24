@@ -55,6 +55,12 @@ Start the RTP proxy server:
 cargo run --release
 ```
 
+By default the server looks for `config.toml` in the current directory. Use `--config` to point to a different file:
+
+```bash
+cargo run --release -- --config etc/config.toml
+```
+
 By default, the gRPC server listens on `[::]:50051`.
 
 Set log level (optional):
